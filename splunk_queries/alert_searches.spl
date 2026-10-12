@@ -1,0 +1,60 @@
+# =============================================================
+# Splunk SPL Alert Searches — Triage Automation Pipeline
+# Topic: Observability Engineering / Splunk SPL
+# Save each as a Splunk Saved Search with webhook alert action
+# =============================================================
+
+
+# ALERT 1: ALB 502 Error Rate Spike
+# Schedule: every 5 min | Trigger: result count > 0
+index=aws_alb earliest=-5m
+| eval is_502=if(elb_status_code="502", 1, 0)
+| stats count as total_requests, sum(is_502) as errors_502 by target_group
+| eval error_rate=round((errors_502/total_requests)*100, 2)
+| where error_rate > 5 AND total_requests > 20
+| eval alert_name="alb_502_error_spike"
+| eval severity=case(
+    error_rate>20, "critical",
+    error_rate>10, "high",
+    true(),        "medium"
+  )
+| eval ci=target_group
+| eval description="ALB 502 error rate: ".error_rate."% over last 5 min"
+| table target_group, total_requests, errors_502, error_rate, severity, ci, description
+
+
+# ALERT 2: Kubernetes OOMKill Detection
+# Schedule: every 5 min | Trigger: result count > 0
+index=kubernetes_events earliest=-10m reason=OOMKilling
+| rex field=message "Killing container (?P<container>[^\s]+)"
+| stats count as oom_count, values(namespace) as namespace by pod_name, container
+| where oom_count >= 2
+| eval alert_name="kubernetes_oomkill_detected"
+| eval severity=case(
+    oom_count>=5, "critical",
+    oom_count>=3, "high",
+    true(),       "medium"
+  )
+| eval ci="prod-k8s-cluster-01"
+| eval description="Pod ".pod_name." OOMKilled ".oom_count." times in 10 min"
+| table pod_name, container, namespace, oom_count, severity, ci, description
+
+
+# ALERT 3: Splunk Alert Storm Detection
+# Schedule: every 5 min | Trigger: result count > 0
+index=_audit action=alert_fired earliest=-5m
+| stats dc(savedsearch_name) as unique_alerts, count as total_firings
+| where unique_alerts > 10
+| eval alert_name="splunk_alert_storm_detected"
+| eval severity="high"
+| eval ci="splunk-prod-cluster"
+| eval description="Alert storm: ".unique_alerts." unique alerts fired in 5 min"
+| table unique_alerts, total_firings, severity, ci, description
+
+
+# DASHBOARD: Triage overview panel (last 30 min)
+index=aws_alb earliest=-30m
+| timechart span=1m
+    count(eval(elb_status_code="502")) as errors_502,
+    count as total
+| eval error_rate=round((errors_502/total)*100, 2)
